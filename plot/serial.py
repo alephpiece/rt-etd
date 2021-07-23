@@ -1,21 +1,22 @@
 from fancyplot import plot_nbars_nlines
 
 # Figure: performance of the serial code
-size = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576]
+size = [1024, 2048, 4096, 8192, 16384, 32768, 65536]
 bars = {
-    "original": [454, 479, 532, 646, 853, 1282, 2129, 4288, 10019, 22884, 50116],
-    "optimized(v1)": [154, 166, 195, 258, 385, 630, 1108, 3229, 8429, 18574, 37558],
-    "optimized(v2)": [263, 277, 308, 375, 497, 759, 1263, 2237, 6263, 15465, 34095]
+    "original": [151.77, 329.39, 905.26, 2042.70, 5966.58, 13148.11, 26704.16],
+    "optimized(v1)": [129.50, 260.18, 612.49, 1504.53, 3666.27, 8922.72, 20350.83],
+    "optimized(v2)": [29.06, 59.43, 271.40, 843.52, 2759.06, 6587.04, 14397.25],
 }
 lines = {
-    "time reduced(v2)": [0.4213, 0.4218, 0.4215, 0.4202, 0.4175, 0.4079, 0.4070, 0.4783, 0.3749, 0.3242, 0.3197]
+    "time reduced(v2)": [0.8085, 0.8196, 0.7002, 0.5871, 0.5376, 0.4990, 0.4609]
 }
+
 plot_nbars_nlines(x=size, bars=bars, lines=lines,
-    baryscale=2, lineylimit=0.55, bardatalabel=False,
+    baryscale=2, lineylimit=0.90, bardatalabel=False,
     linefmt="k^-",
     xlabel="problem size",
     title="Performance of optimized code\n"
           "simulation time: $10^5$s",
     legendloc="center left",
     style="seaborn-deep",
-    out="perf-serial.svg")
+    out="serial-optimization.svg")

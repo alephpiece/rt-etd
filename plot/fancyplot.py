@@ -1,24 +1,30 @@
 #!/usr/bin/env python3
 
 import math
-import numpy as np
-from matplotlib import pyplot, ticker
+import numpy as np  # multi-dimentional arrays and arithmetics
+from matplotlib import pyplot, ticker   # library for making plots, similar to MatLab
 
 def _plot_bars(axes, x, data, barwidth, baryscale, xlabel, lylabel, datalabel):
-    """Draw bars.
+    """An auxiliary function for drawing bars.
     Parameters
     ==========
     x: x coordinates
     data: dictionary of name-list pairs
+    barwidth: width of each bar
+    baryscale: scale of the y-axis
+    xlabel: label of the x-axis, e.g. "processes"
+    lylabel: label of the left y-axis, e.g. "execution time/s"
     datalabel: boolean to indicate whether to show data labels or not
     """
-    # x coordinates of center points
+    # X coordinates of center points
     xn = np.arange(1, len(x)+1)
+    # Offset in the x direction
     offset = (len(data) - 1) * barwidth / 2
 
+    # A counter used to shift each bar to the right position
     count = 0
     for yname, yvalue in data.items():
-        # x coordinates of the current bar
+        # X coordinates of the current bar
         x1 = xn - offset + count * barwidth
 
         # Plotting the bar
@@ -32,11 +38,11 @@ def _plot_bars(axes, x, data, barwidth, baryscale, xlabel, lylabel, datalabel):
         count += 1
 
     # Set other attributes for bars
-    # x-axis
-    axes.set_xticks(xn)      # ticks
-    axes.set_xlabel(xlabel)
+    # X-axis
+    axes.set_xticks(xn)      # ticks of the x-axis, e.g. "1, 2, 3, ..."
+    axes.set_xlabel(xlabel)  # labels along the x-axis, e.g. "8, 16, 32, ..."
 
-    # limits
+    # Limits of axes
     barxlimit = max(xn + offset) + 0.5  # maximum x limit of bars
     barylimit = 0   # maximum y limit of bars
     for yvalue in data.values():
@@ -44,29 +50,35 @@ def _plot_bars(axes, x, data, barwidth, baryscale, xlabel, lylabel, datalabel):
     barylimit = barylimit * baryscale
     axes.set_xlim([0.5, barxlimit])
 
-    # format x tick labels as LaTeX formula
+    # Format x tick labels as LaTeX formula
     formatted_x = list(map(lambda x: "$2^{{{0}}}$".format(int(math.log(x, 2))),
                             x)
                         )
     axes.set_xticklabels(formatted_x)
     #axes.set_xticklabels(x)
 
-    # y-axes
+    # Setup the y-axis
     axes.set_ylabel(lylabel)
     axes.set_ylim([0, barylimit])
     axes.ticklabel_format(axis="y", style="scientific", scilimits=(0,0), useMathText=True)
+
+    # Disable the background grid
     axes.grid(False)
 
 
 def _plot_stacks(axes, x, data, barwidth, baryscale, xlabel, lylabel, datalabel):
-    """Draw stacks.
+    """An auxiliary function for drawing stacks.
     Parameters
     ==========
     x: x coordinates
     data: dictionary of name-list pairs
+    barwidth: width of each bar
+    baryscale: scale of the y-axis
+    xlabel: label of the x-axis, e.g. "processes"
+    lylabel: label of the left y-axis, e.g. "execution time/s"
     datalabel: boolean to indicate whether to show data labels or not
     """
-    # x coordinates of center points
+    # X coordinates of center points
     xn = np.arange(1, len(x)+1)
 
     ybottom = [0] * len(x)
@@ -79,40 +91,46 @@ def _plot_stacks(axes, x, data, barwidth, baryscale, xlabel, lylabel, datalabel)
             for xx, yy in zip(xn, yvalue):
                 axes.text(xx, yy + 10, str(yy), ha="center", va="bottom", fontsize="x-small")
 
-        # bottom of the current stack
+        # Bottom of the current stack
         ybottom = [ybottom[i] + yvalue[i] for i in range(len(yvalue))]
 
     # Set other attributes for bars
-    # x-axis
+    # X-axis
     barxlimit = max(xn) + 0.5  # maximum x limit of bars
     axes.set_xlim([0.5, barxlimit])
     axes.set_xticks(xn)      # ticks
     axes.set_xlabel(xlabel)
 
-    # format x tick labels as LaTeX formula
+    # Format x tick labels as LaTeX formula
     formatted_x = list(map(lambda x: "$2^{{{0}}}$".format(int(math.log(x, 2))),
                             x)
                         )
     axes.set_xticklabels(formatted_x)
     #axes.set_xticklabels(x)
 
-    # y-axes
+    # Setup the y-axis
     barylimit = max(ybottom) * baryscale   # maximum y limit of bars
     axes.set_ylim([0, barylimit])
     axes.set_ylabel(lylabel)
     axes.ticklabel_format(axis="y", style="scientific", scilimits=(0,0), useMathText=True)
+
+    # Disable the background grid
     axes.grid(False)
 
 
 def _plot_lines(axes, x, data, linefmt, lineylimit, rylabel):
-    """Draw lines.
+    """An auxiliary function for drawing lines.
     Parameters
     ==========
     x: x coordinates
     data: dictionary of name-list pairs
+    linefmt: format of lines
+    lineylimit: limit of the y-axis
+    rylabel: label of the right y-axis, e.g. "efficiency"
     """
-    # x coordinates of center points
+    # X coordinates of center points
     xn = np.arange(1, len(x)+1)
+    # Offsets used to adjust data labels
     xtextnudge = -0.03
     ytextnudge = 0.01 * lineylimit
 
@@ -127,10 +145,12 @@ def _plot_lines(axes, x, data, linefmt, lineylimit, rylabel):
     axes.set_ylabel(rylabel)
     axes.set_ylim([0.0, lineylimit])
     axes.yaxis.set_major_formatter(ticker.PercentFormatter(xmax=1, decimals=1))
+
+    # Disable the background grid
     axes.grid(False)
 
 def _locate_legend(loc="upper right"):
-    """Return the relative location of the legend.
+    """An auxiliary function to get the relative location of the legend.
     Parameters
     ==========
     loc: a string indicating the position.
@@ -153,10 +173,11 @@ def _locate_legend(loc="upper right"):
 
     return loc, bbox
 
+
 def plot_nbars_nlines(x, bars, lines,
                       barwidth=0.31, baryscale=1.1, bardatalabel=True,
                       linefmt="^-", lineylimit=1.05,
-                      xlabel="processes", lylabel="runtime/s", rylabel="percentage",
+                      xlabel="processes", lylabel="execution time/s", rylabel="percentage",
                       title="Scalability",
                       legendloc="upper right",
                       style="classic",
@@ -204,8 +225,8 @@ def plot_nbars_nlines(x, bars, lines,
     fig.legend(loc=loc, bbox_to_anchor=bbox, bbox_transform=ax1.transAxes, fontsize="small")
 
     ## Output the figure
-    pyplot.show()
-    #pyplot.savefig(out)
+    #pyplot.show()
+    pyplot.savefig(out)
 
 
 def plot_speedup_lines(x, efficiency,
@@ -227,11 +248,11 @@ def plot_speedup_lines(x, efficiency,
     # Create plot object
     fig, ax = pyplot.subplots()
 
-    # compute speedup
+    # Compute speedup
     idealspeedup = [i/x[0] for i in x]
     actualspeedup = [i*j for i,j in zip(idealspeedup, efficiency)]
 
-    # x coordinates of center points
+    # X coordinates of center points
     xn = np.arange(1, len(x)+1)
     ytextnudge = 1.05
 
