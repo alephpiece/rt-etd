@@ -1,0 +1,508 @@
+#include "device_structs.h"
+#include "partition.h"
+#include "utils.h"
+
+#include <athread.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <simd.h>
+
+#define KB 8.625e-5
+#define T 823
+#define PI 3.1415926536
+#define TIME 1.0e4
+
+// Make sure that each data block of a thread starts from an address aligned
+// to 4B. This is done by forcing the block size for each thread to be divided
+// by 4.
+// If the first element of the first thread starts at 32x, the first element of
+// the ith thread will start at 32x + 8i, such that
+//      (32x + 8i) mod 32 = 0
+// so we can simply make
+//      i mod 4 = 0
+//
+// All of the rest elements are processed by the host.
+#ifdef USE_DEVICE
+    #define GET_DEV_N(n) (((n/64)/4)*4*64)
+#else
+    #define GET_DEV_N(n) 0
+#endif
+
+extern SLAVE_FUN(initializeConstantsOnDevice)();
+extern SLAVE_FUN(computeFOnDevice)();
+
+// Global variables
+int myid = 0;
+DeviceArgs args_dev;    // Arguments for device
+
+
+void computeF(double *fx,
+              size_t n,
+              double x0, double k,
+              double *alpha, double *beta,
+              double *x) {
+    #ifdef USE_DEVICE
+    args_dev.fx = fx;
+    args_dev.x = x;
+    args_dev.alpha = alpha;
+    args_dev.beta = beta;
+    args_dev.x0 = x0;
+    args_dev.k = k;
+
+    // Start computation on device
+    athread_spawn(computeFOnDevice, 0);
+    #endif
+
+    // Computing on host
+    size_t i;
+    size_t dev_n = GET_DEV_N(n);
+
+    #ifdef USE_SIMD
+    size_t nblocks = ((n-dev_n)/4)*4;
+    doublev4 vfx, vx, vx1, vx2, vbeta, vbeta1, valpha1;
+    doublev4 vx0 = x0;
+    doublev4 vk = k;
+    for (i = dev_n; i < nblocks; i+=4) {
+        simd_load(vx, &(x[i]));
+        simd_load(vbeta, &(beta[i]));
+        simd_loadu(vx1, &(x[i+1]));
+        simd_loadu(vbeta1, &(beta[i+1]));
+        simd_loadu(vx2, &(x[i+2]));
+        simd_loadu(valpha1, &(alpha[i+1]));
+
+        vfx = simd_vmad(valpha1, vx2, simd_vmss(vx0, vbeta * vx, vx1 * simd_vmss(vx0, vbeta1, vk)));
+
+        simd_storeu(vfx, &(fx[i]));
+    }
+
+    for (i = nblocks; i < n; i++) {
+        fx[i] = x0 * (beta[i] * x[i]) - x[i+1] * (x0 * beta[i+1] - k) + alpha[i+1] * x[i+2];
+    }
+
+    #else   // no simd
+    for (i = dev_n; i < n; i++) {
+        //fx[i] = x0 * (beta[i] * x[i] - x[i+1] * beta[i+1]) + x[i+1] * k + alpha[i+1] * x[i+2];
+        fx[i] = x0 * (beta[i] * x[i]) - x[i+1] * (x0 * beta[i+1] - k) + alpha[i+1] * x[i+2];
+    }
+    #endif
+
+
+    #ifdef USE_DEVICE
+    // Waiting for the device
+    athread_join();
+    #endif
+}
+
+void computeSumAlphaBeta(double *sum_alpha, double *sum_beta,
+                         double *alpha, double *beta,
+                         double *x, const double x0,
+                         const size_t N,
+                         const int rank) {
+    size_t i;
+    for (i = 0; i < N; i++) {
+        *sum_alpha += alpha[i] * x[i+1];
+        *sum_beta += beta[i+1] * x[i+1] * x0;
+    }
+
+    if (rank == 0) {
+        *sum_alpha -= alpha[0] * x[1];
+        *sum_beta -= beta[1] * x[1] * x0;
+    }
+}
+
+
+int main(int argc,char *argv[]) {
+
+#ifdef USE_DEVICE
+    athread_init();
+    athread_set_num_threads(64);
+#endif
+
+    printf("[Rank %d] Reading arguments...\n", myid);
+
+    // Get inputs
+    size_t N = 64;
+    if (argc > 1) {
+        N = atoi(argv[1]);
+    }
+
+    size_t dev_n = GET_DEV_N(N);
+    printf("[Rank %d] Expected simulation time = %.2f s\n", myid, TIME);
+    printf("[Rank %d] N = %lu, host n = %lu, average n per thread = %lu\n", myid, N, N-dev_n, dev_n/64);
+
+    // Start the timer
+    clock_t start_time = clock();
+    unsigned long counter;
+
+    printf("[Rank %d] Initializing constants...\n", myid);
+
+    size_t i;
+    //double sumalpha=0.0,sumalpha_a=0.0,sumalpha_b=0.0,sumalpha_d=0.0;
+    //double sumbeta=0.0,sumbeta_a=0.0,sumbeta_b=0.0,sumbeta_d=0.0;
+    double AlphaBeta[8]= {0.0}; //sumalpha,sumalpha_a,sumalpha_b,sumalpha_d,sumbeta,sumbeta_a,sumbeta_b,sumbeta_d
+    double tot_AB[8]= {0.0};
+    double t = 0.0;
+    const double dt = 1.0e-1;
+    const double k = 0.0;
+    double Alpha0,Beta0;
+
+    double Vat = 1.205e-29;								//m^3¡£1.205e-29m^3=1.205e-23cm^3
+    double EFvac = 1.77;								//¿ÕÎ»µÄÐÎ³ÉÄÜeV
+    double EMvac = 1.1;                                //¿ÕÎ»µÄÇ¨ÒÆÄÜeV
+    double Dvac= 1.0e-6*exp(-EMvac/(KB*T));    //m^2/s¡£1.0e-6*exp(-EMvac/(KB*T))m^2/s ¿ÕÎ»µÄÀ©É¢ÏµÊý,m^2/s=1.0e+4nm^2/s
+    double Gama = 6.25e18;						//eV/m^2¡£6.25e+18eV/m^2,eV/m^2=1.0e-4eV/nm^2
+    double Cinit = 1.0e-7;                              //atom-1 ³õÊ¼Å¨¶È
+    Beta0 = Alpha0 = pow((double)(48*PI*PI/Vat/Vat),(double)1/3)*Dvac;
+
+    size_t n = N;
+
+    printf("[Rank %d] Allocating memory...\n", myid);
+
+    double *C =     (double *)calloc(n+3, sizeof(double));
+    double *A =     (double *)calloc(n+3, sizeof(double));
+    double *B =     (double *)calloc(n+3, sizeof(double));
+    double *D =     (double *)calloc(n+3, sizeof(double));
+    double *Fa =    (double *)calloc(n+3, sizeof(double));    // F[i] <- F(i'-1), e.g., F[1] is actually F(0)
+    double *Fb =    (double *)calloc(n+3, sizeof(double));
+    double *Fc =    (double *)calloc(n+3, sizeof(double));
+    double *Fd =    (double *)calloc(n+3, sizeof(double));
+    double *Alpha = (double *)calloc(n+3, sizeof(double));
+    double *Beta =  (double *)calloc(n+3, sizeof(double));
+    double *L3 =    (double *)calloc(n, sizeof(double));
+    double *phi1 =  (double *)calloc(n, sizeof(double));
+    double *phi2 =  (double *)calloc(n, sizeof(double));
+    double *phi3 =  (double *)calloc(n, sizeof(double));
+    double *poly1 = (double *)calloc(n, sizeof(double));
+    double *poly2 = (double *)calloc(n, sizeof(double));
+    double *poly3 = (double *)calloc(n, sizeof(double));
+
+
+    #ifdef DEBUG
+    int _dbg_align = 32;
+    printf("[Rank %d] (C addr) mod %d = %lu\n",     myid, _dbg_align, (unsigned long)C % _dbg_align);
+    printf("[Rank %d] (A addr) mod %d = %lu\n",     myid, _dbg_align, (unsigned long)A % _dbg_align);
+    printf("[Rank %d] (B addr) mod %d = %lu\n",     myid, _dbg_align, (unsigned long)B % _dbg_align);
+    printf("[Rank %d] (D addr) mod %d = %lu\n",     myid, _dbg_align, (unsigned long)D % _dbg_align);
+    printf("[Rank %d] (Fc addr) mod %d = %lu\n",    myid, _dbg_align, (unsigned long)Fc % _dbg_align);
+    printf("[Rank %d] (Fa addr) mod %d = %lu\n",    myid, _dbg_align, (unsigned long)Fa % _dbg_align);
+    printf("[Rank %d] (Fb addr) mod %d = %lu\n",    myid, _dbg_align, (unsigned long)Fb % _dbg_align);
+    printf("[Rank %d] (Fd addr) mod %d = %lu\n",    myid, _dbg_align, (unsigned long)Fd % _dbg_align);
+    printf("[Rank %d] (Alpha addr) mod %d = %lu\n", myid, _dbg_align, (unsigned long)Alpha % _dbg_align);
+    printf("[Rank %d] (Beta addr) mod %d = %lu\n",  myid, _dbg_align, (unsigned long)Beta % _dbg_align);
+    printf("[Rank %d] (L3 addr) mod %d = %lu\n",    myid, _dbg_align, (unsigned long)L3 % _dbg_align);
+    printf("[Rank %d] (phi1 addr) mod %d = %lu\n",  myid, _dbg_align, (unsigned long)phi1 % _dbg_align);
+    printf("[Rank %d] (phi2 addr) mod %d = %lu\n",  myid, _dbg_align, (unsigned long)phi2 % _dbg_align);
+    printf("[Rank %d] (phi3 addr) mod %d = %lu\n",  myid, _dbg_align, (unsigned long)phi3 % _dbg_align);
+    printf("[Rank %d] (poly1 addr) mod %d = %lu\n", myid, _dbg_align, (unsigned long)poly1 % _dbg_align);
+    printf("[Rank %d] (poly2 addr) mod %d = %lu\n", myid, _dbg_align, (unsigned long)poly2 % _dbg_align);
+    printf("[Rank %d] (poly3 addr) mod %d = %lu\n", myid, _dbg_align, (unsigned long)poly3 % _dbg_align);
+    #endif
+
+    printf("[Rank %d] Initializing vectors...\n", myid);
+
+    //double acons = 6.02e23;
+    //double at2cb = 8.385e22;
+    //double cb2at = 1./at2cb;
+
+    for (i=0; i<n; i++) {
+        double r = pow((double)(3*(myid*n+i+1)*Vat/(4*PI)),(double)1/3);			//nm
+        double EBvac = EFvac-2*Gama*Vat/r;								//eV¿ÕÎ»È±ÏÝ½áºÏÄÜ
+        Alpha[i] = Alpha0*pow((double)(myid*n+i+1),(double)1/3)*exp(-EBvac/(KB*T));
+        Beta[i+1] = Beta0*pow((double)(myid*n+i+1),(double)1/3);				//¹«Ê½2
+
+        L3[i] = -pow((double)(Alpha[i]+k),(double)-3);
+        phi1[i] = exp(-dt*(Alpha[i]+k)/2);
+        phi2[i] = (1-exp(-dt*(Alpha[i]+k)/2))/(Alpha[i]+k);
+        phi3[i] = exp(-dt*(Alpha[i]+k));
+        poly1[i] = -4+dt*(Alpha[i]+k)+exp(-dt*(Alpha[i]+k))*(4+3*dt*(Alpha[i]+k)+dt*dt*(Alpha[i]+k)*(Alpha[i]+k));
+        poly2[i] = 4-2*dt*(Alpha[i]+k)+exp(-dt*(Alpha[i]+k))*(-4-2*dt*(Alpha[i]+k));
+        poly3[i] = -4+3*dt*(Alpha[i]+k)-dt*dt*(Alpha[i]+k)*(Alpha[i]+k)+exp(-dt*(Alpha[i]+k))*(4+dt*(Alpha[i]+k));
+    }
+
+    if (myid == 0) {
+        L3[0] = -pow((double)(1+k),(double)-3);
+        phi1[0] = exp(-dt*(1+k)/2);
+        phi2[0] = (1-exp(-dt*(1+k)/2))/(1+k);
+        phi3[0] = exp(-dt*(1+k));
+        poly1[0] = -4+dt*(1+k)+exp(-dt*(1+k))*(4+3*dt*(1+k)+dt*dt*(1+k)*(1+k));
+        poly2[0] = 4-2*dt*(1+k)+exp(-dt*(1+k))*(-4-2*dt*(1+k));
+        poly3[0] = -4+3*dt*(1+k)-dt*dt*(1+k)*(1+k)+exp(-dt*(1+k))*(4+dt*(1+k));
+    }
+
+    if (myid == 0) {
+        C[1] = Cinit;
+    }
+    double C0 = Cinit;
+    //C[0] = Cinit*at2cb;                 //atom-1×ª»»³Écm
+
+    #ifdef USE_SIMD
+    size_t simd_blocks = (n/4)*4;  // simd blocks for length n
+    doublev4 vc, va, vb, vd, vphi1, vphi2, vphi3, vfc, vfa, vfb, vfd, vl3, vpoly1, vpoly2, vpoly3;
+    doublev4 vdt2 = pow(dt, -2);
+
+    printf("[Rank %d] SIMD enabled\n", myid);
+    #endif
+
+    #ifdef USE_DEVICE
+    printf("[Rank %d] Initializing device variables...\n", myid);
+
+    // Transfer constants to device
+    DeviceConstants constants_dev;  // Constants for device
+    constants_dev.rank = myid;
+    constants_dev.dev_n = GET_DEV_N(n);
+    athread_spawn(initializeConstantsOnDevice, (void *)&constants_dev);
+    athread_join();
+    #endif
+
+    printf("[Rank %d] Computing...\n", myid);
+
+    while (t < TIME) {
+
+        #ifdef DEBUG
+        printf("[Rank %d] Simulation time = %f, starting computation...\n", myid, t);
+        #endif
+
+        // Compute the sum of alpha and beta
+        computeSumAlphaBeta(&AlphaBeta[0], &AlphaBeta[4],
+            Alpha, Beta, C, C0, n, myid);
+        //MPI_Reduce(AlphaBeta, tot_AB, 8, MPI_DOUBLE, MPI_SUM, 0, comm);
+
+        // Compute F_C(t)
+        #ifdef DEBUG
+        printf("[Rank %d] Computing vector F(C, t)...\n", myid);
+        #endif
+        computeF(Fc, n, C0, k, Alpha, Beta, C);
+
+        if (myid == 0) {
+            Fc[0] = Alpha[1] * C[2] - C0 * (2*Beta[1]*C0 - 1 - k) + tot_AB[0] - tot_AB[4];
+        }
+
+        // Compute A (simd)
+        #ifdef DEBUG
+        printf("[Rank %d] Computing vector A...\n", myid);
+        #endif
+
+        #ifdef USE_SIMD
+        for (i = 0; i < simd_blocks; i+=4) {
+            simd_load(vphi1, &(phi1[i]));
+            simd_load(vphi2, &(phi2[i]));
+            //simd_load(vfc, &(Fc[i]));  // in small-scale tests, there is some penalty with simd_load
+            simd_loadu(vfc, &(Fc[i]));
+            simd_loadu(vc, &(C[i+1]));
+
+            va = simd_vmad(vphi1, vc, vphi2 * vfc);
+
+            simd_storeu(va, &(A[i+1]));
+        }
+        for (i = simd_blocks; i < n; i++) {
+            A[i+1] = phi1[i]*C[i+1] + phi2[i]*Fc[i];
+        }
+        #else
+        for (i = 0; i < n; i++) {
+            A[i+1] = phi1[i]*C[i+1] + phi2[i]*Fc[i];
+        }
+        #endif
+
+        double A0 = A[1];
+        //MPI_Bcast(&A0, 1, MPI_DOUBLE, 0, comm);
+
+        // Compute the sum of alpha and beta
+        computeSumAlphaBeta(&AlphaBeta[1], &AlphaBeta[5],
+            Alpha, Beta, A, A0, n, myid);
+        //MPI_Reduce(AlphaBeta, tot_AB, 8, MPI_DOUBLE, MPI_SUM, 0, comm);
+
+        // Compute F_A(t)
+        #ifdef DEBUG
+        printf("[Rank %d] Computing vector F(A,t)...\n", myid);
+        #endif
+        //counter = -rpcc();
+        computeF(Fa, n, A0, k, Alpha, Beta, A);
+
+        //counter = counter + rpcc();
+        //printf("Section 1: counter = %lu\n", counter);
+
+        if (myid == 0) {
+            Fa[0] = Alpha[1] * A[2] - A0 * (2*Beta[1]*A0 - 1 - k) + tot_AB[1] - tot_AB[5];
+        }
+
+        // Compute B (simd)
+        #ifdef DEBUG
+        printf("[Rank %d] Computing vector B...\n", myid);
+        #endif
+
+        #ifdef USE_SIMD
+        for (i = 0; i < simd_blocks; i+=4) {
+            simd_load(vphi1, &(phi1[i]));
+            simd_load(vphi2, &(phi2[i]));
+            //simd_load(vfa, &(Fa[i]));  // in small-scale tests, there is some penalty with simd_load
+            simd_loadu(vfa, &(Fa[i]));
+            simd_loadu(vc, &(C[i+1]));
+
+            vb = simd_vmad(vphi1, vc, vphi2 * vfa);
+
+            simd_storeu(vb, &(B[i+1]));
+        }
+        for (i = simd_blocks; i < n; i++) {
+            B[i+1] = phi1[i]*C[i+1] + phi2[i]*Fa[i];
+        }
+        #else
+        for (i = 0; i < n; i++) {
+            B[i+1] = phi1[i]*C[i+1] + phi2[i]*Fa[i];
+        }
+        #endif
+
+        double B0 = B[1];
+        //MPI_Bcast(&B0, 1, MPI_DOUBLE, 0, comm);
+
+        // Compute the sum of alpha and beta
+        computeSumAlphaBeta(&AlphaBeta[2], &AlphaBeta[6],
+            Alpha, Beta, B, B0, n, myid);
+        //MPI_Reduce(AlphaBeta, tot_AB, 8, MPI_DOUBLE, MPI_SUM, 0, comm);
+
+        // Compute F_B(t)
+        #ifdef DEBUG
+        printf("[Rank %d] Computing vector F(B,t)...\n", myid);
+        #endif
+        computeF(Fb, n, B0, k, Alpha, Beta, B);
+
+        if (myid == 0) {
+            Fb[0] = Alpha[1] * B[2] - B0 * (2*Beta[1]*B0 - 1 - k) + tot_AB[2] - tot_AB[6];
+        }
+
+        // Compute D
+        #ifdef DEBUG
+        printf("[Rank %d] Computing vector D...\n", myid);
+        #endif
+
+        #ifdef USE_SIMD
+        for (i = 0; i < simd_blocks; i+=4) {
+            doublev4 vtwos = 2.0;
+            simd_load(vphi1, &(phi1[i]));
+            simd_load(vphi2, &(phi2[i]));
+            //simd_load(vfb, &(Fb[i]));  // in small-scale tests, there is some penalty with simd_load
+            //simd_load(vfc, &(Fc[i]));  // but why?
+            simd_loadu(vfb, &(Fb[i]));
+            simd_loadu(vfc, &(Fc[i]));
+            simd_loadu(va, &(A[i+1]));
+
+            vd = simd_vmad(vphi2, simd_vmss(vtwos, vfb, vfc), vphi1 * va);
+
+            simd_storeu(vd, &(D[i+1]));
+        }
+        for (i = simd_blocks; i < n; i++) {
+            D[i+1] = phi1[i]*A[i+1] + phi2[i]*(2*Fb[i]-Fc[i]);
+        }
+        #else
+        for (i = 0; i < n; i++) {
+            D[i+1] = phi1[i]*A[i+1] + phi2[i]*(2*Fb[i]-Fc[i]);
+        }
+        #endif
+
+        double D0 = D[1];
+        //MPI_Bcast(&D0, 1, MPI_DOUBLE, 0, comm);
+
+        // Compute the sum of alpha and beta
+        computeSumAlphaBeta(&AlphaBeta[3], &AlphaBeta[7],
+            Alpha, Beta, D, D0, n, myid);
+        //MPI_Reduce(AlphaBeta, tot_AB, 8, MPI_DOUBLE, MPI_SUM, 0, comm);
+
+        // Compute F_D(t)
+        #ifdef DEBUG
+        printf("[Rank %d] Computing vector F(D,t)...\n", myid);
+        #endif
+        computeF(Fd, n, D0, k, Alpha, Beta, D);
+
+        if (myid == 0) {
+            Fd[0] = Alpha[1] * D[2] - D0 * (2*Beta[1]*D0 - 1 - k) + tot_AB[3] - tot_AB[7];
+        }
+
+        // Compute C (simd, most of the time reduced here)
+        #ifdef DEBUG
+        printf("[Rank %d] Computing vector C...\n", myid);
+        #endif
+
+        #ifdef USE_SIMD
+        for (i = 0; i < simd_blocks; i+=4) {
+            simd_load(vphi3, &(phi3[i]));
+            simd_load(vpoly1, &(poly1[i]));
+            simd_load(vpoly2, &(poly2[i]));
+            simd_load(vpoly3, &(poly3[i]));
+            simd_load(vl3, &(L3[i]));
+            simd_load(vfc, &(Fc[i]));
+            simd_load(vfa, &(Fa[i]));
+            simd_load(vfb, &(Fb[i]));
+            simd_load(vfd, &(Fd[i]));
+            simd_loadu(vc, &(C[i+1]));
+
+            vc = simd_vmad(vphi3, vc,
+                    vdt2 * vl3 * simd_vmad(vpoly1, vfc,
+                        simd_vmad(vpoly2, vfa + vfb, vpoly3 * vfd)));
+
+            simd_storeu(vc, &(C[i+1]));
+        }
+        for (i = simd_blocks; i < n; i++) {
+            C[i+1] = phi3[i] * C[i+1]
+                + pow(dt, -2) * L3[i]
+                * (poly1[i] * Fc[i]
+                    + poly2[i] * (Fa[i] + Fb[i])
+                    + poly3[i] *Fd[i]
+                    );
+        }
+        #else
+        for (i = 0; i < n; i++) {
+            C[i+1] = phi3[i] * C[i+1]
+                + pow(dt, -2) * L3[i]
+                * (poly1[i] * Fc[i]
+                    + poly2[i] * (Fa[i] + Fb[i])
+                    + poly3[i] *Fd[i]
+                    );
+        }
+        #endif
+
+        if (myid == 0) {
+            C0 = C[1];
+        }
+
+        for (i=0; i<8; i++) {
+            AlphaBeta[i] = 0.0;
+        }
+
+        t += dt;
+    }
+
+    #ifdef USE_DEVICE
+    athread_halt();
+    #endif
+
+    // Stop the timer
+    clock_t end_time = clock();
+    double elapsed_time = (double)(end_time - start_time) / CLOCKS_PER_SEC;
+    printf("[Rank %d] N = %lu, Total time = %.2f s\n", myid, N, elapsed_time);
+
+    //for (i = 0; i < n; i++) {
+    //    printf("[Rank %d] C[%d] = %e\n", myid, myid*n+i+1, C[i+1]);
+    //}
+
+    free(C);
+    free(A);
+    free(B);
+    free(D);
+    free(Fa);
+    free(Fb);
+    free(Fc);
+    free(Fd);
+    free(Alpha);
+    free(Beta);
+    free(L3);
+    free(phi1);
+    free(phi2);
+    free(phi3);
+    free(poly1);
+    free(poly2);
+    free(poly3);
+
+    return 0;
+}
+
