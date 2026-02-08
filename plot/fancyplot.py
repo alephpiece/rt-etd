@@ -51,11 +51,11 @@ def _plot_bars(axes, x, data, barwidth, baryscale, xlabel, lylabel, datalabel):
     axes.set_xlim([0.5, barxlimit])
 
     # Format x tick labels as LaTeX formula
-    formatted_x = list(map(lambda x: "$2^{{{0}}}$".format(int(math.log(x, 2))),
-                            x)
-                        )
-    axes.set_xticklabels(formatted_x)
-    #axes.set_xticklabels(x)
+    #formatted_x = list(map(lambda x: "$2^{{{0}}}$".format(int(math.log(x, 2))),
+    #                        x)
+    #                    )
+    #axes.set_xticklabels(formatted_x)
+    axes.set_xticklabels(x)
 
     # Setup the y-axis
     axes.set_ylabel(lylabel)
@@ -102,11 +102,11 @@ def _plot_stacks(axes, x, data, barwidth, baryscale, xlabel, lylabel, datalabel)
     axes.set_xlabel(xlabel)
 
     # Format x tick labels as LaTeX formula
-    formatted_x = list(map(lambda x: "$2^{{{0}}}$".format(int(math.log(x, 2))),
-                            x)
-                        )
-    axes.set_xticklabels(formatted_x)
-    #axes.set_xticklabels(x)
+    #formatted_x = list(map(lambda x: "$2^{{{0}}}$".format(int(math.log(x, 2))),
+    #                        x)
+    #                   )
+    #axes.set_xticklabels(formatted_x)
+    axes.set_xticklabels(x)
 
     # Setup the y-axis
     barylimit = max(ybottom) * baryscale   # maximum y limit of bars
@@ -271,11 +271,18 @@ def plot_speedup_lines(x, efficiency,
     for xx, yy in zip(xn, yvalue):
         ax.text(xx, yy / ytextnudge, f"{yy:.1f}", ha="left", va="top", fontsize="x-small")
     
+    # Format x tick labels as LaTeX formula
+    #formatted_x = list(map(lambda x: "$2^{{{0}}}$".format(int(math.log(x, 2))),
+    #                        x)
+    #                    )
     # Other attributes
     ax.set_xticks(xn)
     ax.set_xlabel(xlabel)
+    #ax.set_xticklabels(formatted_x)
     ax.set_xticklabels(x)
-    ax.set_yscale("log", basey=2)
+    ax.set_yscale("log", base=2)
+    ax.set_yticks(idealspeedup)
+    ax.set_yticklabels([int(x) for x in idealspeedup])
     ax.set_ylabel(ylabel)
     ax.set_xlim([0.5, len(xn)+0.5])
     ax.set_ylim([0.75, 1.5*max(idealspeedup)])
